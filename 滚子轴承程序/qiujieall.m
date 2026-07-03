@@ -173,7 +173,7 @@ allWx=[www2(loadj+marksorti:2*loadj); ones(n-loadj,1)*www2(2*loadj+2);  www2(loa
 allsitajiao=360/n:360/n:360;
 %deltaU1=abs(Dm/2*((1+gama)*(W1+allWo)-gama*allWx));
 %deltaU2=abs(Dm/2*((1-gama)*(W2-allWo)-gama*allWx));
-ffSPEED(data_work,wwmin2);load T1;load T2;load T1nonload;load Q1nonload;load pvzhi1;load pvzhi2;load pvzhinonload;load oilh1;load oilh2;load widthcontactnonload;load deltaU1;load deltaU2;save Wo;save Wx
+ffSPEED(data_work,wwmin2);load T1;load T2;load T1nonload;load Q1nonload;load pvzhi1;load pvzhi2;load pvzhinonload;load oilh1;load oilh2;load widthcontactnonload;load deltaU1;load deltaU2;load U1;load U2;save Wo;save Wx
 load Fm   % 滚子/保持架作用力
 m=ballden*Dw*Dw*lenroller*pi/4;  %滚子的质量计算
 for i=1:loadj
@@ -366,6 +366,44 @@ fclose(fid);
 
 
 %返回值
-returndata=[kk(1,1)  kk(2,2)  kk(3,3)  kk(4,4)  dahualv   L*1e6/(W2*30/pi*60) hminmin  ]; 
+returndata=[kk(1,1)  kk(2,2)  kk(3,3)  kk(4,4)  dahualv   L*1e6/(W2*30/pi*60) hminmin  ];
 
-
+% 滚子轴承热力学等效诊断：不修改切片载荷、残差和刚度。
+thermal_cfg=micro_config.thermal;
+diagnostics_enabled=isfield(thermal_cfg,'thermal_diagnostics_enabled') && isequal(thermal_cfg.thermal_diagnostics_enabled,true);
+feedback_inner_call=isfield(thermal_cfg,'feedback_inner_call') && isequal(thermal_cfg.feedback_inner_call,true);
+if diagnostics_enabled || feedback_inner_call
+    if ~isfield(thermal_cfg,'case_id') || isempty(thermal_cfg.case_id), error('bearingThermal:MissingCaseId','thermal.case_id is required.'); end
+    case_id=char(thermal_cfg.case_id);
+    if contains(case_id,{'/','\',':','..'}), error('bearingThermal:InvalidCaseId','Invalid thermal case_id.'); end
+    T_oil=sita0; T_outer=To; T_inner=Ti; film_weight=0.5;
+    if isfield(thermal_cfg,'T_oil'), T_oil=thermal_cfg.T_oil; end
+    if isfield(thermal_cfg,'T_outer'), T_outer=thermal_cfg.T_outer; end
+    if isfield(thermal_cfg,'T_inner'), T_inner=thermal_cfg.T_inner; end
+    if isfield(thermal_cfg,'film_temperature_weight'), film_weight=thermal_cfg.film_temperature_weight; end
+    T_film=[film_weight*T_oil+(1-film_weight)*T_outer,film_weight*T_oil+(1-film_weight)*T_inner];
+    reference_T=sita0; reference_mu=niandu0; viscosity_alpha=beita0;
+    if isfield(thermal_cfg,'reference_temperature_C'), reference_T=thermal_cfg.reference_temperature_C; end
+    if isfield(thermal_cfg,'reference_viscosity_Pa_s'), reference_mu=thermal_cfg.reference_viscosity_Pa_s; end
+    if isfield(thermal_cfg,'viscosity_temperature_coefficient'), viscosity_alpha=thermal_cfg.viscosity_temperature_coefficient; end
+    thermo_params=struct('temperature_mode','effective_contact','temp_outer',T_film(1),'temp_inner',T_film(2), ...
+        'T0',reference_T,'mu0',reference_mu,'alpha',viscosity_alpha,'h_HD',[mean(oilh1),mean(oilh2)], ...
+        'film_temperature_weight',film_weight,'film_viscosity_exponent',0.70, ...
+        'contact',struct('Q_contact',[Q1(:),Q2(:)], ...
+        'A_eff',[2.*widthcontact1(:).*lengthcontact1(:),2.*widthcontact2(:).*lengthcontact2(:)], ...
+        'h_T',[oilh1(:),oilh2(:)],'U',[U1(:),U2(:)],'v_slip',[deltaU1(:),deltaU2(:)]));
+    if isfield(thermal_cfg,'damping_calibration'), thermo_params.damping_calibration=thermal_cfg.damping_calibration; end
+    thermo_params.thermal_update=struct('enabled',true,'temp_state',[T_outer,T_inner]);
+    heat_names={'eta_s','eta_f','m_eff','cp','UA','dt','T_ambient','T_min','T_max','relax'};
+    for heat_index=1:numel(heat_names)
+        if isfield(thermal_cfg,heat_names{heat_index}), thermo_params.thermal_update.(heat_names{heat_index})=thermal_cfg.(heat_names{heat_index}); end
+    end
+    diagnostics=bearing_thermo(thermo_params);
+    diagnostics.bearing_type='roller'; diagnostics.case_id=case_id;
+    diagnostics.residual_converged=isfinite(result111) && result111<=0.1;
+    diagnostics.lumped_thermal_feedback_available=~isempty(diagnostics.temp_next);
+    diagnostics.lumped_thermal_feedback_active=false; diagnostics.thermal_iterations=0; diagnostics.thermal_converged=false;
+    diagnostics.valid_result=diagnostics.residual_converged && all(isfinite([Q1(:);Q2(:);oilh1(:);oilh2(:)])) && all([oilh1(:);oilh2(:)]>0);
+    diagnostics_file=sprintf('bearing_thermal_diagnostics_roller_%s.mat',case_id);
+    save(diagnostics_file,'-struct','diagnostics');
+end

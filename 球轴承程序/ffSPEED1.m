@@ -389,6 +389,7 @@ for i=1:loadj
 pvzhi1(i)=Ph1(i)*deltaU1(i);  pvzhi2(i)=Ph2(i)*deltaU2(i);
 end
 save pvzhi1; save pvzhi2; save pvzhi1nonload;save deltaU1; save deltaU2;
+save U1; save U2;
 save oilh1;save oilh2;                 %×îÐ¡ÓÍÄ¤ºñ¶È£¡£¡
 
 

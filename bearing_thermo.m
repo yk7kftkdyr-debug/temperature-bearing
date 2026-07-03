@@ -116,6 +116,11 @@ if isfield(params, 'C0') && ~isempty(params.C0)
     Cb_T = scale_equivalent(params.C0, damping_scale, 'C0');
 end
 
+contact_result = contact_diagnostics(params, mu_T);
+if contact_result.present
+    Cb_T = contact_result.Cb_T_total;
+end
+
 % =========================
 % 6. 轴承力 F_b
 % =========================
@@ -132,11 +137,12 @@ if has_q || has_qdot
         apply_operator(Cb_T, params.delta_qdot, 'Cb_T', 'delta_qdot');
 end
 
-[temp_next, Q_shear, Q_friction, Q_gen, thermal_update_status] = ...
-    optional_thermal_update(params, temp_effective, mu_T);
+[temp_next, Q_shear, Q_friction, Q_gen, tau_th, ...
+    Q_shear_contact, Q_friction_contact, thermal_update_status] = ...
+    optional_thermal_update(params, contact_result);
 Cb_T_available = ~isempty(Cb_T);
 Cb_T_used_in_equilibrium = false;
-damping_model_active = false;
+damping_model_active = contact_result.damping_model_active;
 thermal_feedback_active = false;
 
 result = struct( ...
@@ -149,6 +155,9 @@ result = struct( ...
     'Q_shear', Q_shear, ...
     'Q_friction', Q_friction, ...
     'Q_gen', Q_gen, ...
+    'tau_th', tau_th, ...
+    'Q_shear_contact', Q_shear_contact, ...
+    'Q_friction_contact', Q_friction_contact, ...
     'thermal_update_status', thermal_update_status, ...
     'film_viscosity_exponent', film_viscosity_exponent, ...
     'film_temperature_weight', film_temperature_weight, ...
@@ -158,9 +167,88 @@ result = struct( ...
     'Cb_T_available', Cb_T_available, ...
     'Cb_T_used_in_equilibrium', Cb_T_used_in_equilibrium, ...
     'damping_model_active', damping_model_active, ...
+    'pressure_valid', contact_result.pressure_valid, ...
+    'damping_valid', contact_result.damping_valid, ...
+    'heat_valid', contact_result.heat_valid, ...
+    'p_eq_contact', contact_result.p_eq_contact, ...
+    'Cb_T_contact', contact_result.Cb_T_contact, ...
+    'Cb_T_total', contact_result.Cb_T_total, ...
+    'contact_diagnostics_status', contact_result.status, ...
     'thermal_feedback_active', thermal_feedback_active, ...
     'model_name', ['Thermo-viscous reduced-order rolling bearing model ' ...
         'for ball and roller bearing systems']);
+end
+
+function output = contact_diagnostics(params, mu_T)
+output = struct('present',false,'pressure_valid',[], ...
+    'damping_valid',[],'heat_valid',[],'p_eq_contact',[], ...
+    'Cb_T_contact',[],'Cb_T_total',[], ...
+    'damping_model_active',false,'status','not_requested', ...
+    'Q_contact',[],'A_eff',[],'h_T',[],'U',[],'v_slip',[], ...
+    'mu_contact',[]);
+if ~isfield(params,'contact') || isempty(params.contact)
+    return;
+end
+output.present = true;
+contact = params.contact;
+required = {'Q_contact','A_eff','h_T','U','v_slip'};
+for index = 1:numel(required)
+    if ~isfield(contact,required{index}) || isempty(contact.(required{index}))
+        output.status = 'missing_contact_input';
+        return;
+    end
+end
+Q_contact = real_matrix(contact.Q_contact,'contact.Q_contact');
+A_eff = real_matrix(contact.A_eff,'contact.A_eff');
+h_contact = real_matrix(contact.h_T,'contact.h_T');
+U = real_matrix(contact.U,'contact.U');
+v_slip = real_matrix(contact.v_slip,'contact.v_slip');
+expected_size = size(Q_contact);
+if size(Q_contact,2) ~= 2 || ~isequal(size(A_eff),expected_size) || ...
+        ~isequal(size(h_contact),expected_size) || ...
+        ~isequal(size(U),expected_size) || ...
+        ~isequal(size(v_slip),expected_size)
+    error('bearing_thermo:ContactDimensionMismatch', ...
+        'All contact arrays must be equal-sized N-by-2 matrices.');
+end
+mu_nodes = two_node_value(mu_T,'mu_T');
+mu_contact = repmat(mu_nodes,size(Q_contact,1),1);
+pressure_valid = Q_contact>0 & A_eff>0 & ...
+    isfinite(Q_contact) & isfinite(A_eff);
+damping_valid = pressure_valid & h_contact>0 & ...
+    isfinite(h_contact) & isfinite(mu_contact);
+heat_valid = damping_valid & isfinite(U) & isfinite(v_slip);
+p_eq_contact = NaN(expected_size);
+p_eq_contact(pressure_valid) = ...
+    Q_contact(pressure_valid)./A_eff(pressure_valid);
+
+Cb_T_contact = [];
+Cb_T_total = [];
+damping_active = false;
+if isfield(params,'damping_calibration') && ...
+        ~isempty(params.damping_calibration)
+    gamma_c = nonnegative_scalar(params.damping_calibration, ...
+        'damping_calibration');
+    Cb_T_contact = NaN(expected_size);
+    Cb_T_contact(damping_valid) = gamma_c .* ...
+        mu_contact(damping_valid) .* A_eff(damping_valid).^2 ./ ...
+        h_contact(damping_valid).^3;
+    if any(~isfinite(Cb_T_contact(damping_valid)))
+        error('bearing_thermo:InvalidEquivalentDamping', ...
+            'Equivalent damping is nonfinite.');
+    end
+    if any(damping_valid(:))
+        Cb_T_total = sum(Cb_T_contact,1,'omitnan');
+        damping_active = true;
+    end
+end
+output = struct('present',true,'pressure_valid',pressure_valid, ...
+    'damping_valid',damping_valid,'heat_valid',heat_valid, ...
+    'p_eq_contact',p_eq_contact,'Cb_T_contact',Cb_T_contact, ...
+    'Cb_T_total',Cb_T_total,'damping_model_active',damping_active, ...
+    'status','computed','Q_contact',Q_contact,'A_eff',A_eff, ...
+    'h_T',h_contact,'U',U,'v_slip',v_slip, ...
+    'mu_contact',mu_contact);
 end
 
 function require_fields(params, names)
@@ -183,6 +271,23 @@ end
 function value = finite_scalar(value, name)
 validateattributes(value, {'numeric'}, ...
     {'real', 'finite', 'scalar'}, mfilename, name);
+end
+
+function value = real_matrix(value, name)
+validateattributes(value, {'numeric'}, {'real','2d'}, mfilename, name);
+end
+
+function value = two_node_value(value, name)
+validateattributes(value, {'numeric'}, ...
+    {'real','finite','vector'}, mfilename, name);
+if isscalar(value)
+    value = [value,value];
+elseif numel(value) == 2
+    value = reshape(value,1,2);
+else
+    error('bearing_thermo:InvalidTwoNodeValue', ...
+        '%s must be a scalar or two-element vector.',name);
+end
 end
 
 function value = positive_scalar(value, name)
@@ -259,12 +364,16 @@ else
 end
 end
 
-function [temp_next, Q_shear, Q_friction, Q_gen, status] = ...
-        optional_thermal_update(params, temp_effective, mu_T)
+function [temp_next, Q_shear, Q_friction, Q_gen, tau_th, ...
+        Q_shear_contact, Q_friction_contact, status] = ...
+        optional_thermal_update(params, contact)
 temp_next = [];
 Q_shear = [];
 Q_friction = [];
 Q_gen = [];
+tau_th = [];
+Q_shear_contact = [];
+Q_friction_contact = [];
 status = 'disabled';
 if ~isfield(params, 'thermal_update') || isempty(params.thermal_update)
     return;
@@ -274,47 +383,99 @@ validateattributes(cfg, {'struct'}, {'scalar'}, mfilename, 'thermal_update');
 if ~isfield(cfg, 'enabled') || ~cfg.enabled
     return;
 end
-if ~isfield(cfg, 'Q_contact') || isempty(cfg.Q_contact) || ...
-        ~isfield(cfg, 'v_slip') || isempty(cfg.v_slip)
-    status = 'missing_dissipation_input';
+if ~contact.present || ~strcmp(contact.status,'computed')
+    status = 'missing_contact_input';
     return;
 end
-required = {'dt', 'm_eff', 'cp', 'UA', 'T_ambient', 'omega', ...
-    'xi_mu', 'eta_f'};
-require_fields(cfg, required);
+required = {'eta_s','eta_f','m_eff','cp','UA','dt', ...
+    'T_ambient','temp_state'};
+for index = 1:numel(required)
+    if ~isfield(cfg,required{index}) || isempty(cfg.(required{index}))
+        status = 'missing_calibration_input';
+        return;
+    end
+end
 dt = positive_scalar(cfg.dt, 'thermal_update.dt');
-m_eff = positive_scalar(cfg.m_eff, 'thermal_update.m_eff');
-cp = positive_scalar(cfg.cp, 'thermal_update.cp');
-UA = nonnegative_scalar(cfg.UA, 'thermal_update.UA');
-T_ambient = finite_scalar(cfg.T_ambient, 'thermal_update.T_ambient');
-omega = finite_scalar(cfg.omega, 'thermal_update.omega');
-xi_mu = nonnegative_scalar(cfg.xi_mu, 'thermal_update.xi_mu');
+m_eff = positive_two_node(cfg.m_eff,'thermal_update.m_eff');
+cp = positive_two_node(cfg.cp,'thermal_update.cp');
+UA = nonnegative_two_node(cfg.UA,'thermal_update.UA');
+T_ambient = two_node_value(cfg.T_ambient,'thermal_update.T_ambient');
+temp_state = two_node_value(cfg.temp_state,'thermal_update.temp_state');
+eta_s = nonnegative_scalar(cfg.eta_s, 'thermal_update.eta_s');
 eta_f = nonnegative_scalar(cfg.eta_f, 'thermal_update.eta_f');
-validateattributes(cfg.Q_contact, {'numeric'}, ...
-    {'real', 'finite', 'vector'}, mfilename, 'thermal_update.Q_contact');
-validateattributes(cfg.v_slip, {'numeric'}, ...
-    {'real', 'finite', 'vector'}, mfilename, 'thermal_update.v_slip');
-if numel(cfg.Q_contact) ~= numel(cfg.v_slip)
-    error('bearing_thermo:DissipationDimensionMismatch', ...
-        'Q_contact and v_slip must have equal lengths.');
+relax = bounded_positive_unit_scalar(get_option(cfg,'relax',0.3), ...
+    'thermal_update.relax');
+if any(~any(contact.heat_valid,1))
+    status = 'missing_contact_heat_input';
+    return;
 end
-if dt * UA / (m_eff * cp) > 1
-    error('bearing_thermo:UnstableThermalStep', ...
-        'Require dt*UA/(m_eff*cp) <= 1 for the explicit thermal update.');
-end
-% Q_shear 是集总模型的标定型剪切损失接口，其中 xi_mu 负责量纲闭合；
-% 它不等价于完整能量方程的局部剪切耗散项，也不包含速度梯度与空间积分。
-Q_shear = sum(xi_mu .* mu_T .* omega.^2);
-Q_friction = eta_f .* sum(abs(cfg.Q_contact(:) .* cfg.v_slip(:)));
+Q_shear_contact = NaN(size(contact.Q_contact));
+Q_friction_contact = NaN(size(contact.Q_contact));
+valid = contact.heat_valid;
+Q_shear_contact(valid) = eta_s .* contact.mu_contact(valid) .* ...
+    contact.U(valid).^2 ./ contact.h_T(valid) .* contact.A_eff(valid);
+Q_friction_contact(valid) = eta_f .* ...
+    abs(contact.Q_contact(valid).*contact.v_slip(valid));
+Q_shear = sum(Q_shear_contact,1,'omitnan');
+Q_friction = sum(Q_friction_contact,1,'omitnan');
 Q_gen = Q_shear + Q_friction;
-% effective_contact 使用内外圈温度均值作为单节点集总温度；这是工程聚合，
-% 不表示已经求解内外圈空间温度场。
-temp_reference = mean(temp_effective);
-temp_next = temp_reference + dt * ...
-    (Q_gen - UA * (temp_reference - T_ambient)) / (m_eff * cp);
-if ~isfinite(temp_next)
+tau_th = Inf(1,2);
+positive_UA = UA>0;
+tau_th(positive_UA) = ...
+    m_eff(positive_UA).*cp(positive_UA)./UA(positive_UA);
+if any(dt>0.2.*tau_th(isfinite(tau_th)))
+    warning('bearing_thermo:LargeThermalTimeStep', ...
+        'dt exceeds 0.2 times a finite thermal time constant.');
+end
+T_raw = temp_state + dt.* ...
+    (Q_gen-UA.*(temp_state-T_ambient))./(m_eff.*cp);
+temp_next = relax.*T_raw + (1-relax).*temp_state;
+has_min = isfield(cfg,'T_min') && ~isempty(cfg.T_min);
+has_max = isfield(cfg,'T_max') && ~isempty(cfg.T_max);
+if xor(has_min,has_max)
+    error('bearing_thermo:IncompleteTemperatureBounds', ...
+        'T_min and T_max must be provided together.');
+end
+if has_min
+    T_min = two_node_value(cfg.T_min,'thermal_update.T_min');
+    T_max = two_node_value(cfg.T_max,'thermal_update.T_max');
+    if any(T_min>=T_max)
+        error('bearing_thermo:InvalidTemperatureBounds', ...
+            'T_min must be less than T_max at both nodes.');
+    end
+    if any(temp_next<T_min | temp_next>T_max)
+        temp_next = [];
+        status = 'temperature_out_of_range';
+        return;
+    end
+end
+if any(~isfinite(temp_next))
     error('bearing_thermo:InvalidTemperatureUpdate', ...
         'The optional thermal update produced a nonfinite temperature.');
 end
 status = 'computed_open_loop';
+end
+
+function value = positive_two_node(value, name)
+value = two_node_value(value,name);
+if any(value<=0)
+    error('bearing_thermo:InvalidPositiveTwoNodeValue', ...
+        '%s must be positive.',name);
+end
+end
+
+function value = nonnegative_two_node(value, name)
+value = two_node_value(value,name);
+if any(value<0)
+    error('bearing_thermo:InvalidNonnegativeTwoNodeValue', ...
+        '%s must be nonnegative.',name);
+end
+end
+
+function value = bounded_positive_unit_scalar(value, name)
+value = finite_scalar(value,name);
+if value<=0 || value>1
+    error('bearing_thermo:InvalidRelaxation', ...
+        '%s must be within (0,1].',name);
+end
 end

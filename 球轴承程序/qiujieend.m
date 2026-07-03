@@ -159,7 +159,7 @@ end
 
 Famax1(data_input);load Famax;load Fyindao;load fyindao;load zuoyongjiao
 deltapd=clearInfo.deltapd; deltapt1=clearInfo.deltapt1; deltapt2=clearInfo.deltapt2; deltapf1=clearInfo.deltapf1; deltapf2=clearInfo.deltapf2; deltaw=clearInfo.deltaw;
-load deltaU1;load deltaU2;load T1;load T2;load jiaodu2;
+load deltaU1;load deltaU2;load U1;load U2;load T1;load T2;load jiaodu2;
 load oilh1;load oilh2;                 %最小油膜厚度！！
 
 life_ball(datafromvb,Q2,Q1,a2,a1,leixing,Wx)
@@ -285,7 +285,46 @@ fclose(fid);;
 
 
 %返回值
-returndata=[kk(1,1)  kk(2,2)  kk(3,3)  kk(4,4)  kk(5,5)  dahualv  Doc  Dic  L3*1e6/(W2*30/pi*60) hminmin]; 
+returndata=[kk(1,1)  kk(2,2)  kk(3,3)  kk(4,4)  kk(5,5)  dahualv  Doc  Dic  L3*1e6/(W2*30/pi*60) hminmin];
+
+% 球轴承热力学等效诊断：不修改接触力、残差和刚度。
+thermal_cfg=micro_config.thermal;
+diagnostics_enabled=isfield(thermal_cfg,'thermal_diagnostics_enabled') && isequal(thermal_cfg.thermal_diagnostics_enabled,true);
+feedback_inner_call=isfield(thermal_cfg,'feedback_inner_call') && isequal(thermal_cfg.feedback_inner_call,true);
+if diagnostics_enabled || feedback_inner_call
+    if ~isfield(thermal_cfg,'case_id') || isempty(thermal_cfg.case_id), error('bearingThermal:MissingCaseId','thermal.case_id is required.'); end
+    case_id=char(thermal_cfg.case_id);
+    if contains(case_id,{'/','\',':','..'}), error('bearingThermal:InvalidCaseId','Invalid thermal case_id.'); end
+    T_oil=sita0; T_outer=sita0; T_inner=sita0; film_weight=0.5;
+    if isfield(thermal_cfg,'T_oil'), T_oil=thermal_cfg.T_oil; end
+    if isfield(thermal_cfg,'T_outer'), T_outer=thermal_cfg.T_outer; end
+    if isfield(thermal_cfg,'T_inner'), T_inner=thermal_cfg.T_inner; end
+    if isfield(thermal_cfg,'film_temperature_weight'), film_weight=thermal_cfg.film_temperature_weight; end
+    T_film=[film_weight*T_oil+(1-film_weight)*T_outer,film_weight*T_oil+(1-film_weight)*T_inner];
+    reference_T=sita0; reference_mu=niandu0; viscosity_alpha=beita0;
+    if isfield(thermal_cfg,'reference_temperature_C'), reference_T=thermal_cfg.reference_temperature_C; end
+    if isfield(thermal_cfg,'reference_viscosity_Pa_s'), reference_mu=thermal_cfg.reference_viscosity_Pa_s; end
+    if isfield(thermal_cfg,'viscosity_temperature_coefficient'), viscosity_alpha=thermal_cfg.viscosity_temperature_coefficient; end
+    thermo_params=struct('temperature_mode','effective_contact','temp_outer',T_film(1),'temp_inner',T_film(2), ...
+        'T0',reference_T,'mu0',reference_mu,'alpha',viscosity_alpha,'h_HD',[mean(oilh1),mean(oilh2)], ...
+        'film_temperature_weight',film_weight,'film_viscosity_exponent',0.68, ...
+        'contact',struct('Q_contact',[Q1(:),Q2(:)],'A_eff',[pi.*aa1(:).*b1(:),pi.*aa2(:).*b2(:)], ...
+        'h_T',[oilh1(:),oilh2(:)],'U',[U1(:),U2(:)],'v_slip',[deltaU1(:),deltaU2(:)]));
+    if isfield(thermal_cfg,'damping_calibration'), thermo_params.damping_calibration=thermal_cfg.damping_calibration; end
+    thermo_params.thermal_update=struct('enabled',true,'temp_state',[T_outer,T_inner]);
+    heat_names={'eta_s','eta_f','m_eff','cp','UA','dt','T_ambient','T_min','T_max','relax'};
+    for heat_index=1:numel(heat_names)
+        if isfield(thermal_cfg,heat_names{heat_index}), thermo_params.thermal_update.(heat_names{heat_index})=thermal_cfg.(heat_names{heat_index}); end
+    end
+    diagnostics=bearing_thermo(thermo_params);
+    diagnostics.bearing_type='ball'; diagnostics.case_id=case_id;
+    diagnostics.residual_converged=ball_final_residual<=ball_final_residual_limit;
+    diagnostics.lumped_thermal_feedback_available=~isempty(diagnostics.temp_next);
+    diagnostics.lumped_thermal_feedback_active=false; diagnostics.thermal_iterations=0; diagnostics.thermal_converged=false;
+    diagnostics.valid_result=diagnostics.residual_converged && all(isfinite([Q1(:);Q2(:);oilh1(:);oilh2(:)])) && all([oilh1(:);oilh2(:)]>0);
+    diagnostics_file=sprintf('bearing_thermal_diagnostics_ball_%s.mat',case_id);
+    save(diagnostics_file,'-struct','diagnostics');
+end
 
 
 % 绘图供vb调用！！
