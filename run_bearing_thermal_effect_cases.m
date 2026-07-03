@@ -121,6 +121,7 @@ try
     runLog = evalc('[loadj, returndata] = qiujieend(datafromvb, cfg);');
     [record.warning_flag, record.comment] = classify_warning(runLog);
     record = fill_metrics(record, "ball", loadj, returndata);
+    record = validate_record(record);
     copyfile(fullfile(projectRoot, 'results_bearing_base', 'ball', '*'), outDir);
 catch ME
     record.warning_flag = 'error';
@@ -141,6 +142,7 @@ try
     runLog = evalc('[loadj, returndata] = qiujieall(datafromvb, cfg);');
     [record.warning_flag, record.comment] = classify_warning(runLog);
     record = fill_metrics(record, "roller", loadj, returndata);
+    record = validate_record(record);
     copyfile(fullfile(projectRoot, 'results_bearing_base', 'roller', '*'), outDir);
 catch ME
     record.warning_flag = 'error';
@@ -184,52 +186,78 @@ end
 
 function record = fill_metrics(record, bearingType, loadj, returndata)
 record.loaded_element_count = loadj;
-record.max_contact_load = max_from_mats({'Q1.mat', 'Q2.mat'});
-record.max_contact_stress = max_from_mats({'Ph1.mat', 'Ph2.mat'});
-record.min_oil_film_thickness = min_from_mats({'oilh1.mat', 'oilh2.mat'});
-record.PV_value = max_from_mats({'pvzhi1.mat', 'pvzhi2.mat', 'pvzhinonload.mat', 'pvzhi1nonload.mat'});
+record.max_contact_load = max_named_from_mats( ...
+    {'Q1.mat', 'Q2.mat'}, {'Q1', 'Q2'});
+record.max_contact_stress = max_named_from_mats( ...
+    {'Ph1.mat', 'Ph2.mat'}, {'Ph1', 'Ph2'});
+record.min_oil_film_thickness = min_named_from_mats( ...
+    {'oilh1.mat', 'oilh2.mat'}, {'oilh1', 'oilh2'});
 if bearingType == "ball"
+    record.PV_value = max_named_from_mats( ...
+        {'pvzhi1.mat', 'pvzhi2.mat', 'pvzhi1nonload.mat'}, ...
+        {'pvzhi1', 'pvzhi2', 'pvzhi1nonload'});
     record.cage_slip_ratio = value_or_nan(returndata, 6);
     record.equivalent_stiffness_x = value_or_nan(returndata, 1);
     record.equivalent_stiffness_y = value_or_nan(returndata, 2);
     record.life_or_damage_index = value_or_nan(returndata, 9);
 else
+    record.PV_value = max_named_from_mats( ...
+        {'pvzhi1.mat', 'pvzhi2.mat', 'pvzhinonload.mat'}, ...
+        {'pvzhi1', 'pvzhi2', 'pvzhinonload'});
     record.cage_slip_ratio = value_or_nan(returndata, 5);
-    record.equivalent_stiffness_x = NaN;
-    record.equivalent_stiffness_y = value_or_nan(returndata, 1);
+    record.equivalent_stiffness_x = value_or_nan(returndata, 1);
+    record.equivalent_stiffness_y = value_or_nan(returndata, 2);
     record.life_or_damage_index = value_or_nan(returndata, 6);
 end
 end
 
-function value = max_from_mats(fileNames)
-value = NaN;
+function value = max_named_from_mats(fileNames, variableNames)
+values = read_named_values(fileNames, variableNames);
+value = max(values, [], 'omitnan');
+end
+
+function value = min_named_from_mats(fileNames, variableNames)
+values = read_named_values(fileNames, variableNames);
+value = min(values, [], 'omitnan');
+end
+
+function values = read_named_values(fileNames, variableNames)
+assert(numel(fileNames) == numel(variableNames), ...
+    'ThermalSummary:VariableMapping', ...
+    'MAT file and variable-name lists must have equal length.');
+values = [];
 for i = 1:numel(fileNames)
-    if exist(fileNames{i}, 'file') == 2
-        data = load(fileNames{i});
-        names = fieldnames(data);
-        for j = 1:numel(names)
-            candidate = data.(names{j});
-            if isnumeric(candidate) && ~isempty(candidate)
-                value = max([value; candidate(:)], [], 'omitnan');
-            end
-        end
+    if exist(fileNames{i}, 'file') ~= 2
+        continue;
     end
+    data = load(fileNames{i}, variableNames{i});
+    if ~isfield(data, variableNames{i})
+        continue;
+    end
+    candidate = data.(variableNames{i});
+    if isnumeric(candidate) && ~isempty(candidate)
+        values = [values; candidate(:)]; %#ok<AGROW>
+    end
+end
+if isempty(values)
+value = NaN;
+values = value;
 end
 end
 
-function value = min_from_mats(fileNames)
-value = NaN;
-for i = 1:numel(fileNames)
-    if exist(fileNames{i}, 'file') == 2
-        data = load(fileNames{i});
-        names = fieldnames(data);
-        for j = 1:numel(names)
-            candidate = data.(names{j});
-            if isnumeric(candidate) && ~isempty(candidate)
-                value = min([value; candidate(:)], [], 'omitnan');
-            end
-        end
-    end
+function record = validate_record(record)
+criticalValues = [record.max_contact_load, record.max_contact_stress, ...
+    record.min_oil_film_thickness, record.PV_value, ...
+    record.cage_slip_ratio, record.equivalent_stiffness_x, ...
+    record.equivalent_stiffness_y, record.life_or_damage_index];
+record.valid_result = all(isfinite(criticalValues)) && ...
+    record.min_oil_film_thickness > 0;
+if record.valid_result && strcmp(record.warning_flag, 'singular_matrix')
+    record.comment = ['completed_with_warning：最终关键输出有限且油膜为正；' ...
+        '迭代过程中出现奇异矩阵相关警告'];
+elseif ~record.valid_result && ~strcmp(record.warning_flag, 'error')
+    record.warning_flag = 'invalid_result';
+    record.comment = '结果包含NaN、Inf或非正油膜厚度';
 end
 end
 
@@ -265,6 +293,7 @@ record = struct( ...
     'equivalent_stiffness_x', NaN, ...
     'equivalent_stiffness_y', NaN, ...
     'life_or_damage_index', NaN, ...
+    'valid_result', false, ...
     'warning_flag', '', ...
     'comment', '');
 end
