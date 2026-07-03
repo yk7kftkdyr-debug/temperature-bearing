@@ -19,6 +19,9 @@ thermalTable = [
    100, 140, 180, 165, 185, 130];
 
 rho_oil = 970; % kg/m^3, from uploaded thermal-effect document
+reference_T = 20;
+reference_mu = oil_dynamic_viscosity(reference_T, rho_oil);
+viscosity_alpha = 0.02815;
 records = repmat(empty_record(), 0, 1);
 
 for row = 1:size(thermalTable, 1)
@@ -37,6 +40,9 @@ for row = 1:size(thermalTable, 1)
     cfg.thermal.enabled = true;
     cfg.thermal.Ct1 = 1;
     cfg.thermal.Ct2 = 1;
+    cfg.thermal.reference_temperature_C = reference_T;
+    cfg.thermal.reference_viscosity_Pa_s = reference_mu;
+    cfg.thermal.viscosity_temperature_coefficient = viscosity_alpha;
 
     tempDir = fullfile(desktopOut, sprintf('ambient_%03dC', ambient_T));
     ballOut = fullfile(tempDir, 'ball');
@@ -116,6 +122,7 @@ record = base_record('ball', ambient_T, outer_T, inner_T, rolling_T, shaft_T, ho
 record.Fx_N = datafromvb(16);
 record.Fy_N = datafromvb(17);
 record.Fz_N = datafromvb(18);
+clear_case_artifacts("ball");
 lastwarn('');
 try
     runLog = evalc('[loadj, returndata] = qiujieend(datafromvb, cfg);');
@@ -137,6 +144,7 @@ record = base_record('roller', ambient_T, outer_T, inner_T, rolling_T, shaft_T, 
 record.Fx_N = NaN;
 record.Fy_N = datafromvb(19);
 record.Fz_N = datafromvb(20);
+clear_case_artifacts("roller");
 lastwarn('');
 try
     runLog = evalc('[loadj, returndata] = qiujieall(datafromvb, cfg);');
@@ -186,8 +194,20 @@ end
 
 function record = fill_metrics(record, bearingType, loadj, returndata)
 record.loaded_element_count = loadj;
-record.max_contact_load = max_named_from_mats( ...
-    {'Q1.mat', 'Q2.mat'}, {'Q1', 'Q2'});
+if bearingType == "ball"
+    contact = load('q1q2a1a2.mat', 'q1q2a1a2');
+    contact = contact.q1q2a1a2;
+    record.max_contact_load = max(contact(:, 1:2), [], 'all');
+    record.final_residual = NaN;
+    residualLimit = NaN;
+    record.residual_status = 'not_available_after_stiffness_perturbation';
+else
+    record.max_contact_load = max_named_from_mats( ...
+        {'Q1.mat', 'Q2.mat'}, {'Q1', 'Q2'});
+    record.final_residual = scalar_from_mat('result111.mat', 'result111');
+    residualLimit = 0.1;
+    record.residual_status = 'available';
+end
 record.max_contact_stress = max_named_from_mats( ...
     {'Ph1.mat', 'Ph2.mat'}, {'Ph1', 'Ph2'});
 record.min_oil_film_thickness = min_named_from_mats( ...
@@ -209,6 +229,9 @@ else
     record.equivalent_stiffness_y = value_or_nan(returndata, 2);
     record.life_or_damage_index = value_or_nan(returndata, 6);
 end
+record.residual_limit = residualLimit;
+record.stiffness_source = 'contact_finite_difference';
+record.damping_model_active = false;
 end
 
 function value = max_named_from_mats(fileNames, variableNames)
@@ -250,14 +273,38 @@ criticalValues = [record.max_contact_load, record.max_contact_stress, ...
     record.min_oil_film_thickness, record.PV_value, ...
     record.cage_slip_ratio, record.equivalent_stiffness_x, ...
     record.equivalent_stiffness_y, record.life_or_damage_index];
+residualValid = ~isfinite(record.residual_limit) || ...
+    (isfinite(record.final_residual) && ...
+    record.final_residual <= record.residual_limit);
 record.valid_result = all(isfinite(criticalValues)) && ...
-    record.min_oil_film_thickness > 0;
+    record.min_oil_film_thickness > 0 && residualValid;
 if record.valid_result && strcmp(record.warning_flag, 'singular_matrix')
     record.comment = ['completed_with_warning：最终关键输出有限且油膜为正；' ...
         '迭代过程中出现奇异矩阵相关警告'];
 elseif ~record.valid_result && ~strcmp(record.warning_flag, 'error')
     record.warning_flag = 'invalid_result';
     record.comment = '结果包含NaN、Inf或非正油膜厚度';
+end
+end
+
+function value = scalar_from_mat(fileName, variableName)
+data = load(fileName, variableName);
+value = data.(variableName);
+value = value(1);
+end
+
+function clear_case_artifacts(bearingType)
+common = {'Ph1.mat','Ph2.mat','oilh1.mat','oilh2.mat', ...
+    'pvzhi1.mat','pvzhi2.mat'};
+if bearingType == "ball"
+    files = [common, {'q1q2a1a2.mat','pvzhi1nonload.mat','result333.mat'}];
+else
+    files = [common, {'Q1.mat','Q2.mat','pvzhinonload.mat','result111.mat'}];
+end
+for i = 1:numel(files)
+    if exist(files{i}, 'file') == 2
+        delete(files{i});
+    end
 end
 end
 
@@ -293,6 +340,11 @@ record = struct( ...
     'equivalent_stiffness_x', NaN, ...
     'equivalent_stiffness_y', NaN, ...
     'life_or_damage_index', NaN, ...
+    'final_residual', NaN, ...
+    'residual_limit', NaN, ...
+    'residual_status', '', ...
+    'stiffness_source', '', ...
+    'damping_model_active', false, ...
     'valid_result', false, ...
     'warning_flag', '', ...
     'comment', '');
