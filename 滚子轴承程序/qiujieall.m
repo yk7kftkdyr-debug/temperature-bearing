@@ -29,6 +29,15 @@ end
 if nargin < 2 || isempty(micro_config)
     micro_config = make_micro_interface_config();
 end
+run_feedback=micro_config.thermal.enabled && ...
+    isfield(micro_config.thermal,'lumped_feedback_enabled') && ...
+    isequal(micro_config.thermal.lumped_feedback_enabled,true) && ...
+    ~(isfield(micro_config.thermal,'feedback_inner_call') && ...
+    isequal(micro_config.thermal.feedback_inner_call,true));
+if run_feedback
+    [loadj,returndata]=run_roller_thermal_feedback(datafromvb,micro_config);
+    return;
+end
 save('micro_config_runtime.mat','micro_config');
 
 data_input = datafromvb;
@@ -403,7 +412,61 @@ if diagnostics_enabled || feedback_inner_call
     diagnostics.residual_converged=isfinite(result111) && result111<=0.1;
     diagnostics.lumped_thermal_feedback_available=~isempty(diagnostics.temp_next);
     diagnostics.lumped_thermal_feedback_active=false; diagnostics.thermal_iterations=0; diagnostics.thermal_converged=false;
-    diagnostics.valid_result=diagnostics.residual_converged && all(isfinite([Q1(:);Q2(:);oilh1(:);oilh2(:)])) && all([oilh1(:);oilh2(:)]>0);
+    heat_valid=~isempty(diagnostics.Q_gen) && all(isfinite(diagnostics.Q_gen)) && all(diagnostics.Q_gen>=0);
+    diagnostics.valid_result=diagnostics.residual_converged && heat_valid && all(isfinite([Q1(:);Q2(:);oilh1(:);oilh2(:)])) && all([oilh1(:);oilh2(:)]>0);
     diagnostics_file=sprintf('bearing_thermal_diagnostics_roller_%s.mat',case_id);
     save(diagnostics_file,'-struct','diagnostics');
+end
+end
+
+function [loadj,returndata]=run_roller_thermal_feedback(datafromvb,cfg)
+thermal=cfg.thermal;
+required={'case_id','T_outer','T_inner'};
+for index=1:numel(required)
+    if ~isfield(thermal,required{index}) || isempty(thermal.(required{index}))
+        error('bearingThermal:MissingFeedbackInput','thermal.%s is required.',required{index});
+    end
+end
+max_iter=get_control(thermal,'max_thermal_iter',20);
+tol_T=get_control(thermal,'tol_T',1e-6);
+validateattributes(max_iter,{'numeric'},{'real','finite','scalar','integer','positive'});
+validateattributes(tol_T,{'numeric'},{'real','finite','scalar','positive'});
+T_current=[thermal.T_outer,thermal.T_inner];
+T_history=T_current;
+thermal_converged=false;
+thermal_update_status='max_iterations_reached';
+diagnostics_file=sprintf('bearing_thermal_diagnostics_roller_%s.mat',char(thermal.case_id));
+for thermal_iter=1:max_iter
+    inner_cfg=cfg;
+    inner_cfg.thermal.feedback_inner_call=true;
+    inner_cfg.thermal.lumped_feedback_enabled=false;
+    inner_cfg.thermal.thermal_diagnostics_enabled=true;
+    inner_cfg.thermal.T_outer=T_current(1);
+    inner_cfg.thermal.T_inner=T_current(2);
+    [loadj,returndata]=qiujieall(datafromvb,inner_cfg);
+    diag=load(diagnostics_file);
+    if isempty(diag.temp_next), thermal_update_status=diag.thermal_update_status; break; end
+    T_next=diag.temp_next;
+    T_history(end+1,:)=T_next; %#ok<AGROW>
+    temperature_error=max(abs(T_next-T_current));
+    T_current=T_next;
+    if thermal_iter>=2 && temperature_error<tol_T && diag.residual_converged
+        thermal_converged=true; thermal_update_status='converged'; break;
+    end
+end
+if ~thermal_converged && strcmp(thermal_update_status,'max_iterations_reached')
+    warning('bearingThermal:NotConverged','Roller thermal feedback did not converge.');
+end
+diag.T_history=T_history;
+diag.thermal_iterations=thermal_iter;
+diag.thermal_converged=thermal_converged;
+diag.thermal_update_status=thermal_update_status;
+diag.lumped_thermal_feedback_available=true;
+diag.lumped_thermal_feedback_active=thermal_iter>=2;
+diag.valid_result=diag.valid_result && thermal_converged;
+save(diagnostics_file,'-struct','diag');
+end
+
+function value=get_control(config,name,default_value)
+if isfield(config,name) && ~isempty(config.(name)), value=config.(name); else, value=default_value; end
 end
