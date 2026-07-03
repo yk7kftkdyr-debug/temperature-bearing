@@ -16,6 +16,11 @@ function result = bearing_thermo(params)
 %
 % 不涉及流体动压滑动轴承失稳机理，不包含 oil whirl、oil whip、
 % 特征值稳定性判据、0.45 倍频判据或三次非线性刚度。
+%
+% 当前工程接入状态（论文与结果解释必须保持一致）：
+% ffLOAD/ff2 仅使用本模块的 mu_T 与 h_T，通过接触变形重新求解载荷，
+% 等效刚度来自原接触模型的有限差分；显式 Kb_T、Cb_T、F_b 为预留
+% 接口，当前主求解不激活阻尼修正，也不构成完整 THD 温度场模型。
 
 validateattributes(params, {'struct'}, {'scalar'}, mfilename, 'params');
 require_fields(params, {'temp', 'T0', 'mu0', 'alpha', 'h_HD'});
@@ -41,6 +46,12 @@ if n < 0.3 || n > 1.0
     error('bearing_thermo:InvalidDampingExponent', ...
         'damping_exponent must be within [0.3, 1.0].');
 end
+film_viscosity_exponent = positive_scalar(get_option(params, ...
+    'film_viscosity_exponent', 0.68), 'film_viscosity_exponent');
+if film_viscosity_exponent > 1.0
+    error('bearing_thermo:InvalidFilmViscosityExponent', ...
+        'film_viscosity_exponent must be within (0, 1.0].');
+end
 
 % =========================
 % 1. 粘度计算 mu(T)
@@ -60,7 +71,8 @@ viscosity_ratio = mu_T / mu0;
 % 3. 油膜厚度 h(T)
 % =========================
 % 来源：Hamrock-Dowson EHL empirical relation。
-h_T = h_HD .* viscosity_ratio.^0.68;
+% 默认指数 0.68 用于点接触；滚子线接触可由调用方显式传入 0.70。
+h_T = h_HD .* viscosity_ratio.^film_viscosity_exponent;
 
 % =========================
 % 4. 刚度 Kb(T)（EHL 降阶）
@@ -112,6 +124,7 @@ result = struct( ...
     'F_b', F_b, ...
     'temp_next', temp_next, ...
     'Q_friction', Q_friction, ...
+    'film_viscosity_exponent', film_viscosity_exponent, ...
     'temperature_mode', 'inlet', ...
     'model_name', ['Thermo-viscous reduced-order rolling bearing model ' ...
         'for ball and roller bearing systems']);

@@ -198,9 +198,11 @@ if bearingType == "ball"
     contact = load('q1q2a1a2.mat', 'q1q2a1a2');
     contact = contact.q1q2a1a2;
     record.max_contact_load = max(contact(:, 1:2), [], 'all');
-    record.final_residual = NaN;
-    residualLimit = NaN;
-    record.residual_status = 'not_available_after_stiffness_perturbation';
+    residualData = load('ball_final_residual.mat', ...
+        'ball_final_residual', 'ball_final_residual_limit');
+    record.final_residual = residualData.ball_final_residual;
+    residualLimit = residualData.ball_final_residual_limit;
+    record.residual_status = 'captured_before_stiffness_perturbation';
 else
     record.max_contact_load = max_named_from_mats( ...
         {'Q1.mat', 'Q2.mat'}, {'Q1', 'Q2'});
@@ -297,7 +299,8 @@ function clear_case_artifacts(bearingType)
 common = {'Ph1.mat','Ph2.mat','oilh1.mat','oilh2.mat', ...
     'pvzhi1.mat','pvzhi2.mat'};
 if bearingType == "ball"
-    files = [common, {'q1q2a1a2.mat','pvzhi1nonload.mat','result333.mat'}];
+    files = [common, {'q1q2a1a2.mat','pvzhi1nonload.mat','result333.mat', ...
+        'ball_final_residual.mat'}];
 else
     files = [common, {'Q1.mat','Q2.mat','pvzhinonload.mat','result111.mat'}];
 end

@@ -144,7 +144,33 @@ end
 if micro_config.debris.enabled
     debris_shift = micro_config.debris.ud + micro_config.debris.debris_displacement;
 end
-oilh1(i)=thermal_factor1*texture_factor*2.65*Rr1*(nianya0*E1)^0.54*(niandu0*UU1/(E1*Rr1))^0.7*(Q10(i)/(lenroller*E1*Rr1))^(-0.13);oilh2(i)=thermal_factor2*texture_factor*2.65*Rr2*(nianya0*E2)^0.54*(niandu0*UU2/(E2*Rr2))^0.7*(Q20(i)/(lenroller*E2*Rr2))^(-0.13);
+if micro_config.thermal.enabled
+    % Same roller thermo-film mapping as ff2; residual and Jacobian stay consistent.
+    reference_T = sita0;
+    reference_mu = niandu0;
+    viscosity_alpha = beita0;
+    if isfield(micro_config.thermal, 'reference_temperature_C')
+        reference_T = micro_config.thermal.reference_temperature_C;
+    end
+    if isfield(micro_config.thermal, 'reference_viscosity_Pa_s')
+        reference_mu = micro_config.thermal.reference_viscosity_Pa_s;
+    end
+    if isfield(micro_config.thermal, 'viscosity_temperature_coefficient')
+        viscosity_alpha = micro_config.thermal.viscosity_temperature_coefficient;
+    end
+    h_HD1 = 2.65*Rr1*(nianya0*E1)^0.54*(reference_mu*UU1/(E1*Rr1))^0.7*(Q10(i)/(lenroller*E1*Rr1))^(-0.13);
+    h_HD2 = 2.65*Rr2*(nianya0*E2)^0.54*(reference_mu*UU2/(E2*Rr2))^0.7*(Q20(i)/(lenroller*E2*Rr2))^(-0.13);
+    thermo_params = struct('temp', sita0, 'T0', reference_T, ...
+        'mu0', reference_mu, 'alpha', viscosity_alpha, ...
+        'h_HD', [h_HD1, h_HD2], ...
+        'film_viscosity_exponent', 0.70);
+    thermo_state = bearing_thermo(thermo_params);
+    oilh1(i) = thermal_factor1*texture_factor*thermo_state.h_T(1);
+    oilh2(i) = thermal_factor2*texture_factor*thermo_state.h_T(2);
+else
+    oilh1(i)=thermal_factor1*texture_factor*2.65*Rr1*(nianya0*E1)^0.54*(niandu0*UU1/(E1*Rr1))^0.7*(Q10(i)/(lenroller*E1*Rr1))^(-0.13);
+    oilh2(i)=thermal_factor2*texture_factor*2.65*Rr2*(nianya0*E2)^0.54*(niandu0*UU2/(E2*Rr2))^0.7*(Q20(i)/(lenroller*E2*Rr2))^(-0.13);
+end
 %*****************************************************************************************   
  
 %***********************************考虑热效应膜厚计算公式******************************************************   

@@ -68,7 +68,12 @@ deltar0=2*(1-cos(a0))*(f1+f2-1)*Dw;               %求原始径向间隙！
 %a0=acos(1-deltar0/(f1+f2-1)/Dw/2);
 qiujieLOAD(datafromvb);  
 load loadi;load www3          %初步求解载荷分布！！
-ffLOAD(datafromvb,loadi,www3);load zzzz3;zz3=zzzz3;
+ffLOAD(datafromvb,loadi,www3);load zzzz3;load result444;zz3=zzzz3;
+% Capture the converged main-equilibrium residual before stiffness perturbations.
+ball_final_residual = result444;
+ball_final_residual_limit = 0.01;
+save('ball_final_residual.mat', ...
+    'ball_final_residual', 'ball_final_residual_limit');
 iii=1;j=1;
 for iii=1:5
     neiquan1=www3; neiquan1(2*loadj+iii)=www3(2*loadj+iii)+1e-10;

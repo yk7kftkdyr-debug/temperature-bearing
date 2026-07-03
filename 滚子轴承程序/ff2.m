@@ -114,7 +114,8 @@ if micro_config.thermal.enabled
     h_HD2 = 2.65*Rr2*(nianya0*E2)^0.54*(reference_mu*UU2/(E2*Rr2))^0.7*(Q20(i)/(lenroller*E2*Rr2))^(-0.13);
     thermo_params = struct('temp', sita0, 'T0', reference_T, ...
         'mu0', reference_mu, 'alpha', viscosity_alpha, ...
-        'h_HD', [h_HD1, h_HD2]);
+        'h_HD', [h_HD1, h_HD2], ...
+        'film_viscosity_exponent', 0.70);
     thermo_state = bearing_thermo(thermo_params);
     oilh1(i) = thermal_factor1*texture_factor*thermo_state.h_T(1);
     oilh2(i) = thermal_factor2*texture_factor*thermo_state.h_T(2);
