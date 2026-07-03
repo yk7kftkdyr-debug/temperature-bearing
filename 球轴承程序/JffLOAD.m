@@ -110,8 +110,56 @@ U2(i)=abs((W2-Wo)*Dm/4+0.5*(abs(Wx)*cos(a0)-(W2-Wo)*cos(a0))*(Dw/2));	micro_conf
 if micro_config.debris.enabled
     debris_shift = micro_config.debris.ud + micro_config.debris.debris_displacement;
 end
-oilh1(i)=thermal_factor1*texture_factor*Rx1*3.63*(niandu0*U1(i)/(E1*Rx1))^(0.68)*(nianya0*E1)^(0.49)*(Q10(i)/Rx1^2/E1)^(-0.073)*(1-exp(-0.68*K1));
-oilh2(i)=thermal_factor2*texture_factor*Rx2*3.63*(niandu0*U2(i)/(E2*Rx2))^(0.68)*(nianya0*E2)^(0.49)*(Q20(i)/Rx2^2/E2)^(-0.073)*(1-exp(-0.68*K2));  
+if micro_config.thermal.enabled
+    % 与 ffLOAD 相同的热膜路径，保证残差与 Jacobian 物理一致。
+    reference_T = sita0; reference_mu = niandu0; viscosity_alpha = beita0;
+    temperature_mode = 'inlet';
+    T_oil = sita0; T_outer = sita0; T_inner = sita0;
+    film_temperature_weight = 0.5;
+    if numel(datafromvb) >= 47 && isnumeric(datafromvb(47)) && ...
+            isreal(datafromvb(47)) && isscalar(datafromvb(47)) && ...
+            isfinite(datafromvb(47))
+        T_outer = datafromvb(47);
+    end
+    if numel(datafromvb) >= 48 && isnumeric(datafromvb(48)) && ...
+            isreal(datafromvb(48)) && isscalar(datafromvb(48)) && ...
+            isfinite(datafromvb(48))
+        T_inner = datafromvb(48);
+    end
+    if isfield(micro_config.thermal, 'reference_temperature_C'), reference_T = micro_config.thermal.reference_temperature_C; end
+    if isfield(micro_config.thermal, 'reference_viscosity_Pa_s'), reference_mu = micro_config.thermal.reference_viscosity_Pa_s; end
+    if isfield(micro_config.thermal, 'viscosity_temperature_coefficient'), viscosity_alpha = micro_config.thermal.viscosity_temperature_coefficient; end
+    if isfield(micro_config.thermal, 'temperature_mode'), temperature_mode = char(micro_config.thermal.temperature_mode); end
+    if isfield(micro_config.thermal, 'T_oil'), T_oil = micro_config.thermal.T_oil; end
+    if isfield(micro_config.thermal, 'T_outer'), T_outer = micro_config.thermal.T_outer; end
+    if isfield(micro_config.thermal, 'T_inner'), T_inner = micro_config.thermal.T_inner; end
+    if isfield(micro_config.thermal, 'film_temperature_weight'), film_temperature_weight = micro_config.thermal.film_temperature_weight; end
+    validateattributes(film_temperature_weight, {'numeric'}, ...
+        {'real','finite','scalar','>=',0,'<=',1}, mfilename, ...
+        'film_temperature_weight');
+    h_HD1 = Rx1*3.63*(reference_mu*U1(i)/(E1*Rx1))^(0.68)*(nianya0*E1)^(0.49)*(Q10(i)/Rx1^2/E1)^(-0.073)*(1-exp(-0.68*K1));
+    h_HD2 = Rx2*3.63*(reference_mu*U2(i)/(E2*Rx2))^(0.68)*(nianya0*E2)^(0.49)*(Q20(i)/Rx2^2/E2)^(-0.073)*(1-exp(-0.68*K2));
+    thermo_params = struct('temp', T_oil, 'T0', reference_T, ...
+        'mu0', reference_mu, 'alpha', viscosity_alpha, ...
+        'h_HD', [h_HD1, h_HD2], ...
+        'film_viscosity_exponent', 0.68, ...
+        'film_temperature_weight', film_temperature_weight);
+    if strcmpi(temperature_mode, 'effective_contact')
+        thermo_params.temperature_mode = 'effective_contact';
+        thermo_params.temp_outer = film_temperature_weight*T_oil + ...
+            (1-film_temperature_weight)*T_outer;
+        thermo_params.temp_inner = film_temperature_weight*T_oil + ...
+            (1-film_temperature_weight)*T_inner;
+    else
+        thermo_params.temperature_mode = 'inlet';
+    end
+    thermo_state = bearing_thermo(thermo_params);
+    oilh1(i) = thermal_factor1*texture_factor*thermo_state.h_T(1);
+    oilh2(i) = thermal_factor2*texture_factor*thermo_state.h_T(2);
+else
+    oilh1(i)=thermal_factor1*texture_factor*Rx1*3.63*(niandu0*U1(i)/(E1*Rx1))^(0.68)*(nianya0*E1)^(0.49)*(Q10(i)/Rx1^2/E1)^(-0.073)*(1-exp(-0.68*K1));
+    oilh2(i)=thermal_factor2*texture_factor*Rx2*3.63*(niandu0*U2(i)/(E2*Rx2))^(0.68)*(nianya0*E2)^(0.49)*(Q20(i)/Rx2^2/E2)^(-0.073)*(1-exp(-0.68*K2));
+end
 
 % oilh1(1)=0.114*10^(-6);oilh1(2)=0.114*10^(-6);oilh1(3)=0.114*10^(-6);oilh1(4)=0.114*10^(-6);oilh1(5)=0.115*10^(-6);oilh1(6)=0.116*10^(-6);
 % oilh1(7)=0.117*10^(-6);oilh1(8)=0.118*10^(-6);oilh1(9)=0.118*10^(-6);

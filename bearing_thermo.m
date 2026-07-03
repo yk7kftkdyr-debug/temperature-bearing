@@ -23,8 +23,7 @@ function result = bearing_thermo(params)
 % 接口，当前主求解不激活阻尼修正，也不构成完整 THD 温度场模型。
 
 validateattributes(params, {'struct'}, {'scalar'}, mfilename, 'params');
-require_fields(params, {'temp', 'T0', 'mu0', 'alpha', 'h_HD'});
-temp = finite_scalar(params.temp, 'temp');
+require_fields(params, {'T0', 'mu0', 'alpha', 'h_HD'});
 T0 = finite_scalar(params.T0, 'T0');
 mu0 = positive_scalar(params.mu0, 'mu0');
 alpha = nonnegative_scalar(params.alpha, 'alpha');
@@ -32,10 +31,29 @@ validateattributes(params.h_HD, {'numeric'}, ...
     {'real', 'finite', 'positive'}, mfilename, 'h_HD');
 h_HD = params.h_HD;
 
-temperature_mode = char(get_option(params, 'temperature_mode', 'inlet'));
-if ~strcmpi(temperature_mode, 'inlet')
-    error('bearing_thermo:UnsupportedTemperatureMode', ...
-        'Only temperature_mode=''inlet'' is implemented in this phase.');
+temperature_mode = lower(char(get_option(params, ...
+    'temperature_mode', 'inlet')));
+film_temperature_weight = bounded_unit_scalar(get_option(params, ...
+    'film_temperature_weight', 0.5), 'film_temperature_weight');
+switch temperature_mode
+    case 'inlet'
+        require_fields(params, {'temp'});
+        temp_effective = finite_scalar(params.temp, 'temp');
+    case 'effective_contact'
+        require_fields(params, {'temp_outer', 'temp_inner'});
+        temp_effective = [ ...
+            finite_scalar(params.temp_outer, 'temp_outer'), ...
+            finite_scalar(params.temp_inner, 'temp_inner')];
+        if numel(h_HD) ~= 2
+            error('bearing_thermo:InvalidFilmReferenceSize', ...
+                ['effective_contact requires h_HD=[outer,inner] ' ...
+                'with exactly two elements.']);
+        end
+        h_HD = reshape(h_HD, 1, 2);
+    otherwise
+        error('bearing_thermo:UnsupportedTemperatureMode', ...
+            ['temperature_mode must be ''inlet'' or ' ...
+            '''effective_contact''.']);
 end
 
 beta = positive_scalar(get_option(params, 'stiffness_exponent', 1), ...
@@ -58,8 +76,8 @@ end
 % =========================
 % 来源：Reid / Hamrock viscosity-temperature relation。
 % 温度变化时缓存键同步变化，因此每个新温度状态都会重新计算。
-mu_T = cached_andrade(temp, T0, mu0, alpha);
-viscosity_ratio = mu_T / mu0;
+mu_T = cached_andrade(temp_effective, T0, mu0, alpha);
+viscosity_ratio = mu_T ./ mu0;
 
 % =========================
 % 2. Reynolds 一致性说明
@@ -114,7 +132,12 @@ if has_q || has_qdot
         apply_operator(Cb_T, params.delta_qdot, 'Cb_T', 'delta_qdot');
 end
 
-[temp_next, Q_friction] = optional_thermal_update(params, temp, mu_T);
+[temp_next, Q_shear, Q_friction, Q_gen, thermal_update_status] = ...
+    optional_thermal_update(params, temp_effective, mu_T);
+Cb_T_available = ~isempty(Cb_T);
+Cb_T_used_in_equilibrium = false;
+damping_model_active = false;
+thermal_feedback_active = false;
 
 result = struct( ...
     'mu_T', mu_T, ...
@@ -123,9 +146,19 @@ result = struct( ...
     'Cb_T', Cb_T, ...
     'F_b', F_b, ...
     'temp_next', temp_next, ...
+    'Q_shear', Q_shear, ...
     'Q_friction', Q_friction, ...
+    'Q_gen', Q_gen, ...
+    'thermal_update_status', thermal_update_status, ...
     'film_viscosity_exponent', film_viscosity_exponent, ...
-    'temperature_mode', 'inlet', ...
+    'film_temperature_weight', film_temperature_weight, ...
+    'temperature_mode', temperature_mode, ...
+    'temp_effective', temp_effective, ...
+    'temperature_fallback_used', false, ...
+    'Cb_T_available', Cb_T_available, ...
+    'Cb_T_used_in_equilibrium', Cb_T_used_in_equilibrium, ...
+    'damping_model_active', damping_model_active, ...
+    'thermal_feedback_active', thermal_feedback_active, ...
     'model_name', ['Thermo-viscous reduced-order rolling bearing model ' ...
         'for ball and roller bearing systems']);
 end
@@ -162,12 +195,20 @@ validateattributes(value, {'numeric'}, ...
     {'real', 'finite', 'scalar', 'nonnegative'}, mfilename, name);
 end
 
+function value = bounded_unit_scalar(value, name)
+value = finite_scalar(value, name);
+if value < 0 || value > 1
+    error('bearing_thermo:InvalidUnitIntervalValue', ...
+        '%s must be within [0, 1].', name);
+end
+end
+
 function mu_T = cached_andrade(temp, T0, mu0, alpha)
 persistent cached_key cached_mu
 key = [temp, T0, mu0, alpha];
 if isempty(cached_key) || ~isequaln(key, cached_key)
-    cached_mu = mu0 * exp(-alpha * (temp - T0));
-    if ~isfinite(cached_mu) || cached_mu <= 0
+    cached_mu = mu0 .* exp(-alpha .* (temp - T0));
+    if any(~isfinite(cached_mu)) || any(cached_mu <= 0)
         error('bearing_thermo:InvalidViscosity', ...
             ['Andrade relation produced a nonpositive or nonfinite ' ...
             'viscosity.']);
@@ -182,7 +223,7 @@ validateattributes(base, {'numeric'}, {'real', 'finite'}, mfilename, name);
 if strcmp(name, 'C0') && any(base(:) < 0)
     error('bearing_thermo:NegativeDamping', 'C0 must be nonnegative.');
 end
-if isscalar(scale)
+if isscalar(base) || isscalar(scale)
     scaled = base .* scale;
 elseif isequal(size(base), size(scale))
     scaled = base .* scale;
@@ -218,9 +259,13 @@ else
 end
 end
 
-function [temp_next, Q_friction] = optional_thermal_update(params, temp, mu_T)
+function [temp_next, Q_shear, Q_friction, Q_gen, status] = ...
+        optional_thermal_update(params, temp_effective, mu_T)
 temp_next = [];
+Q_shear = [];
 Q_friction = [];
+Q_gen = [];
+status = 'disabled';
 if ~isfield(params, 'thermal_update') || isempty(params.thermal_update)
     return;
 end
@@ -229,8 +274,13 @@ validateattributes(cfg, {'struct'}, {'scalar'}, mfilename, 'thermal_update');
 if ~isfield(cfg, 'enabled') || ~cfg.enabled
     return;
 end
+if ~isfield(cfg, 'Q_contact') || isempty(cfg.Q_contact) || ...
+        ~isfield(cfg, 'v_slip') || isempty(cfg.v_slip)
+    status = 'missing_dissipation_input';
+    return;
+end
 required = {'dt', 'm_eff', 'cp', 'UA', 'T_ambient', 'omega', ...
-    'loss_factor'};
+    'xi_mu', 'eta_f'};
 require_fields(cfg, required);
 dt = positive_scalar(cfg.dt, 'thermal_update.dt');
 m_eff = positive_scalar(cfg.m_eff, 'thermal_update.m_eff');
@@ -238,18 +288,33 @@ cp = positive_scalar(cfg.cp, 'thermal_update.cp');
 UA = nonnegative_scalar(cfg.UA, 'thermal_update.UA');
 T_ambient = finite_scalar(cfg.T_ambient, 'thermal_update.T_ambient');
 omega = finite_scalar(cfg.omega, 'thermal_update.omega');
-loss_factor = nonnegative_scalar(cfg.loss_factor, ...
-    'thermal_update.loss_factor');
+xi_mu = nonnegative_scalar(cfg.xi_mu, 'thermal_update.xi_mu');
+eta_f = nonnegative_scalar(cfg.eta_f, 'thermal_update.eta_f');
+validateattributes(cfg.Q_contact, {'numeric'}, ...
+    {'real', 'finite', 'vector'}, mfilename, 'thermal_update.Q_contact');
+validateattributes(cfg.v_slip, {'numeric'}, ...
+    {'real', 'finite', 'vector'}, mfilename, 'thermal_update.v_slip');
+if numel(cfg.Q_contact) ~= numel(cfg.v_slip)
+    error('bearing_thermo:DissipationDimensionMismatch', ...
+        'Q_contact and v_slip must have equal lengths.');
+end
 if dt * UA / (m_eff * cp) > 1
     error('bearing_thermo:UnstableThermalStep', ...
         'Require dt*UA/(m_eff*cp) <= 1 for the explicit thermal update.');
 end
-% loss_factor 为有量纲标定系数，使 Q_friction 的单位为 W。
-Q_friction = mu_T * omega^2 * loss_factor;
-temp_next = temp + dt * ...
-    (Q_friction - UA * (temp - T_ambient)) / (m_eff * cp);
+% Q_shear 是集总模型的标定型剪切损失接口，其中 xi_mu 负责量纲闭合；
+% 它不等价于完整能量方程的局部剪切耗散项，也不包含速度梯度与空间积分。
+Q_shear = sum(xi_mu .* mu_T .* omega.^2);
+Q_friction = eta_f .* sum(abs(cfg.Q_contact(:) .* cfg.v_slip(:)));
+Q_gen = Q_shear + Q_friction;
+% effective_contact 使用内外圈温度均值作为单节点集总温度；这是工程聚合，
+% 不表示已经求解内外圈空间温度场。
+temp_reference = mean(temp_effective);
+temp_next = temp_reference + dt * ...
+    (Q_gen - UA * (temp_reference - T_ambient)) / (m_eff * cp);
 if ~isfinite(temp_next)
     error('bearing_thermo:InvalidTemperatureUpdate', ...
         'The optional thermal update produced a nonfinite temperature.');
 end
+status = 'computed_open_loop';
 end

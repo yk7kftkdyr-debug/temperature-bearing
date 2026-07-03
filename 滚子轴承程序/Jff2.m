@@ -149,6 +149,19 @@ if micro_config.thermal.enabled
     reference_T = sita0;
     reference_mu = niandu0;
     viscosity_alpha = beita0;
+    temperature_mode = 'inlet';
+    T_oil = sita0; T_outer = sita0; T_inner = sita0;
+    film_temperature_weight = 0.5;
+    if numel(datafromvb) >= 45 && isnumeric(datafromvb(45)) && ...
+            isreal(datafromvb(45)) && isscalar(datafromvb(45)) && ...
+            isfinite(datafromvb(45))
+        T_outer = datafromvb(45);
+    end
+    if numel(datafromvb) >= 46 && isnumeric(datafromvb(46)) && ...
+            isreal(datafromvb(46)) && isscalar(datafromvb(46)) && ...
+            isfinite(datafromvb(46))
+        T_inner = datafromvb(46);
+    end
     if isfield(micro_config.thermal, 'reference_temperature_C')
         reference_T = micro_config.thermal.reference_temperature_C;
     end
@@ -158,12 +171,34 @@ if micro_config.thermal.enabled
     if isfield(micro_config.thermal, 'viscosity_temperature_coefficient')
         viscosity_alpha = micro_config.thermal.viscosity_temperature_coefficient;
     end
+    if isfield(micro_config.thermal, 'temperature_mode')
+        temperature_mode = char(micro_config.thermal.temperature_mode);
+    end
+    if isfield(micro_config.thermal, 'T_oil'), T_oil = micro_config.thermal.T_oil; end
+    if isfield(micro_config.thermal, 'T_outer'), T_outer = micro_config.thermal.T_outer; end
+    if isfield(micro_config.thermal, 'T_inner'), T_inner = micro_config.thermal.T_inner; end
+    if isfield(micro_config.thermal, 'film_temperature_weight')
+        film_temperature_weight = micro_config.thermal.film_temperature_weight;
+    end
+    validateattributes(film_temperature_weight, {'numeric'}, ...
+        {'real','finite','scalar','>=',0,'<=',1}, mfilename, ...
+        'film_temperature_weight');
     h_HD1 = 2.65*Rr1*(nianya0*E1)^0.54*(reference_mu*UU1/(E1*Rr1))^0.7*(Q10(i)/(lenroller*E1*Rr1))^(-0.13);
     h_HD2 = 2.65*Rr2*(nianya0*E2)^0.54*(reference_mu*UU2/(E2*Rr2))^0.7*(Q20(i)/(lenroller*E2*Rr2))^(-0.13);
-    thermo_params = struct('temp', sita0, 'T0', reference_T, ...
+    thermo_params = struct('temp', T_oil, 'T0', reference_T, ...
         'mu0', reference_mu, 'alpha', viscosity_alpha, ...
         'h_HD', [h_HD1, h_HD2], ...
-        'film_viscosity_exponent', 0.70);
+        'film_viscosity_exponent', 0.70, ...
+        'film_temperature_weight', film_temperature_weight);
+    if strcmpi(temperature_mode, 'effective_contact')
+        thermo_params.temperature_mode = 'effective_contact';
+        thermo_params.temp_outer = film_temperature_weight*T_oil + ...
+            (1-film_temperature_weight)*T_outer;
+        thermo_params.temp_inner = film_temperature_weight*T_oil + ...
+            (1-film_temperature_weight)*T_inner;
+    else
+        thermo_params.temperature_mode = 'inlet';
+    end
     thermo_state = bearing_thermo(thermo_params);
     oilh1(i) = thermal_factor1*texture_factor*thermo_state.h_T(1);
     oilh2(i) = thermal_factor2*texture_factor*thermo_state.h_T(2);
